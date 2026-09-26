@@ -1,8 +1,9 @@
 import dotenv from 'dotenv';
 import express from 'express';
-import { createServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
 import process from 'node:process';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { DailyTask } from './src/types/progress';
 import type { UserState } from './src/types/user';
 
@@ -83,11 +84,21 @@ app.post('/api/daily-plan', async (request, response) => {
   }
 });
 
-const vite = await createServer({
-  server: { middlewareMode: true },
-  appType: 'spa'
-});
-app.use(vite.middlewares);
+const isProduction = process.env.NODE_ENV === 'production' || process.argv.includes('--production');
+if (isProduction) {
+  const distDirectory = path.join(path.dirname(fileURLToPath(import.meta.url)), 'dist');
+  app.use(express.static(distDirectory));
+  app.get('*', (_request, response) => {
+    response.sendFile(path.join(distDirectory, 'index.html'));
+  });
+} else {
+  const { createServer } = await import('vite');
+  const vite = await createServer({
+    server: { middlewareMode: true },
+    appType: 'spa'
+  });
+  app.use(vite.middlewares);
+}
 
 const port = Number(process.env.PORT || 3000);
 app.listen(port, '0.0.0.0', () => {
