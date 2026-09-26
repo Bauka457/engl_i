@@ -1,0 +1,6 @@
+{
+  "name": "English Journey",
+  "description": "Your personal interactive English learning platform from A1 to B1 with AI-driven adaptive daily plans, phrase mastery, grammar roadmap, speaking, writing, and tests.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
