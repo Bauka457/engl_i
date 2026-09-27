@@ -65,22 +65,48 @@ export function renderSpeakingPage(
   const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
   const microphoneErrorMessage = (error: string) => {
-    if (error === 'not-allowed' || error === 'service-not-allowed') {
+    if (error === 'not-allowed' || error === 'service-not-allowed' || error === 'NotAllowedError' || error === 'SecurityError') {
       return isRu
         ? 'Доступ к микрофону заблокирован. Нажмите на значок настроек сайта рядом с адресом страницы, разрешите микрофон и обновите страницу. Затем нажмите на микрофон ещё раз.'
         : 'Microphone access is blocked. Open this site’s settings from the icon beside the address bar, allow microphone access, and reload the page. Then try the microphone again.';
     }
-    if (error === 'audio-capture') {
+    if (error === 'audio-capture' || error === 'NotFoundError' || error === 'DevicesNotFoundError') {
       return isRu
-        ? 'Микрофон не найден или занят другим приложением. Проверьте подключение и выберите нужный микрофон в настройках сайта.'
-        : 'No microphone was found, or it is being used by another app. Check the connection and select the microphone in site settings.';
+        ? 'Микрофон не найден. Подключите его и проверьте, что он выбран в настройках звука устройства.'
+        : 'No microphone was found. Connect one and check that it is selected in your device sound settings.';
+    }
+    if (error === 'NotReadableError' || error === 'TrackStartError') {
+      return isRu
+        ? 'Микрофон занят или заблокирован другой программой. Закройте приложения, использующие микрофон, и попробуйте снова.'
+        : 'The microphone is busy or blocked by another app. Close other apps using it and try again.';
     }
     if (error === 'no-speech') {
       return isRu ? 'Речь не распознана. Попробуйте говорить ближе к микрофону.' : 'No speech was detected. Try speaking closer to the microphone.';
     }
+    if (error === 'network') {
+      return isRu
+        ? 'Сервис распознавания речи недоступен. Проверьте интернет и попробуйте другой браузер, например Chrome.'
+        : 'The speech recognition service is unavailable. Check your internet connection or try another browser such as Chrome.';
+    }
+    if (error === 'InvalidStateError') {
+      return isRu ? 'Распознавание уже запущено. Остановите его и попробуйте снова.' : 'Speech recognition is already running. Stop it and try again.';
+    }
+    if (error !== 'unknown') {
+      return isRu
+        ? `Браузер сообщил ошибку: ${error}. Попробуйте Chrome или введите ответ вручную.`
+        : `Browser error: ${error}. Try Chrome or type your response instead.`;
+    }
     return isRu
       ? 'Не удалось запустить распознавание речи. Проверьте разрешение микрофона в настройках сайта и попробуйте снова.'
       : 'Speech recognition could not start. Check microphone permission in site settings and try again.';
+  };
+
+  const getMicrophoneErrorCode = (error: unknown) => {
+    if (error && typeof error === 'object') {
+      const exception = error as { name?: string; message?: string };
+      return exception.name || exception.message || 'unknown';
+    }
+    return typeof error === 'string' ? error : 'unknown';
   };
 
   const showMicrophoneError = (error: string) => {
@@ -394,7 +420,7 @@ export function renderSpeakingPage(
           } catch (e) {
             console.error(e);
             isRecording = false;
-            showMicrophoneError('unknown');
+            showMicrophoneError(getMicrophoneErrorCode(e));
           }
         }
       });
@@ -490,7 +516,7 @@ export function renderSpeakingPage(
           rec.start();
         } catch (error) {
           console.error(error);
-          showMicrophoneError('unknown');
+          showMicrophoneError(getMicrophoneErrorCode(error));
         }
       });
 
