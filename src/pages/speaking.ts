@@ -49,6 +49,8 @@ export function renderSpeakingPage(
   let transcriptText = '';
   let evaluationResult: any = null;
   let isAnalyzing = false;
+  let microphoneError = '';
+  let chatDraft = '';
 
   // Mode 2 State (AI Tutor Chat)
   let chatHistory: Array<{ role: 'user' | 'assistant'; text: string; correction?: string }> = [
@@ -61,6 +63,30 @@ export function renderSpeakingPage(
 
   // Initialize SpeechRecognition if available
   const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+  const microphoneErrorMessage = (error: string) => {
+    if (error === 'not-allowed' || error === 'service-not-allowed') {
+      return isRu
+        ? 'Доступ к микрофону заблокирован. Нажмите на значок настроек сайта рядом с адресом страницы, разрешите микрофон и обновите страницу. Затем нажмите на микрофон ещё раз.'
+        : 'Microphone access is blocked. Open this site’s settings from the icon beside the address bar, allow microphone access, and reload the page. Then try the microphone again.';
+    }
+    if (error === 'audio-capture') {
+      return isRu
+        ? 'Микрофон не найден или занят другим приложением. Проверьте подключение и выберите нужный микрофон в настройках сайта.'
+        : 'No microphone was found, or it is being used by another app. Check the connection and select the microphone in site settings.';
+    }
+    if (error === 'no-speech') {
+      return isRu ? 'Речь не распознана. Попробуйте говорить ближе к микрофону.' : 'No speech was detected. Try speaking closer to the microphone.';
+    }
+    return isRu
+      ? 'Не удалось запустить распознавание речи. Проверьте разрешение микрофона в настройках сайта и попробуйте снова.'
+      : 'Speech recognition could not start. Check microphone permission in site settings and try again.';
+  };
+
+  const showMicrophoneError = (error: string) => {
+    microphoneError = microphoneErrorMessage(error);
+    render();
+  };
 
   const render = () => {
     container.innerHTML = `
@@ -90,6 +116,12 @@ export function renderSpeakingPage(
           </button>
         </div>
       </div>
+
+      ${microphoneError ? `
+        <div id="mic-error-help" role="alert" style="max-width: 760px; margin: 0 auto 16px; padding: 14px 16px; border: 1px solid var(--accent-rose); border-radius: var(--radius-md); color: var(--text-primary); background: var(--bg-surface); line-height: 1.5;">
+          ${microphoneError}
+        </div>
+      ` : ''}
 
       <!-- Mode 1: Speaking Prompt -->
       ${
@@ -257,6 +289,11 @@ export function renderSpeakingPage(
       }
     `;
 
+    if (currentMode === 'tutor') {
+      const chatInput = container.querySelector('#tutor-chat-input') as HTMLInputElement | null;
+      if (chatInput) chatInput.value = chatDraft;
+    }
+
     // Mode switch
     container.querySelectorAll('.mode-switch-btn').forEach((btn) => {
       btn.addEventListener('click', (e) => {
@@ -318,6 +355,8 @@ export function renderSpeakingPage(
         } else {
           // Start recording
           try {
+            microphoneError = '';
+            container.querySelector('#mic-error-help')?.remove();
             recognition = new SpeechRecognition();
             recognition.lang = 'en-US';
             recognition.interimResults = true;
@@ -343,7 +382,7 @@ export function renderSpeakingPage(
             recognition.onerror = (event: any) => {
               console.error('Speech recognition error:', event.error);
               isRecording = false;
-              render();
+              showMicrophoneError(event.error);
             };
 
             recognition.onend = () => {
@@ -355,7 +394,7 @@ export function renderSpeakingPage(
           } catch (e) {
             console.error(e);
             isRecording = false;
-            render();
+            showMicrophoneError('unknown');
           }
         }
       });
@@ -392,11 +431,15 @@ export function renderSpeakingPage(
       const chatInput = container.querySelector('#tutor-chat-input') as HTMLInputElement;
       const sendBtn = container.querySelector('#tutor-chat-send-btn') as HTMLElement;
       const chatArea = container.querySelector('#tutor-chat-messages') as HTMLElement;
+      chatInput?.addEventListener('input', () => {
+        chatDraft = chatInput.value;
+      });
 
       const sendMessage = async () => {
         const text = chatInput?.value.trim();
         if (!text) return;
         chatInput.value = '';
+        chatDraft = '';
 
         chatHistory.push({ role: 'user', text });
         render();
@@ -425,16 +468,30 @@ export function renderSpeakingPage(
           Toast.show(isRu ? 'Web Speech API не поддерживается' : 'Web Speech API not supported', 'warning');
           return;
         }
-        const rec = new SpeechRecognition();
-        rec.lang = 'en-US';
-        rec.onstart = () => {
-          Toast.show(isRu ? 'Слушаю... Говорите на английском' : 'Listening... Speak in English', 'info');
-        };
-        rec.onresult = (ev: any) => {
-          const t = ev.results[0][0].transcript;
-          if (chatInput) chatInput.value = t;
-        };
-        rec.start();
+        try {
+          microphoneError = '';
+          container.querySelector('#mic-error-help')?.remove();
+          const rec = new SpeechRecognition();
+          rec.lang = 'en-US';
+          rec.onstart = () => {
+            Toast.show(isRu ? 'Слушаю... Говорите на английском' : 'Listening... Speak in English', 'info');
+          };
+          rec.onresult = (ev: any) => {
+            const text = ev.results[0][0].transcript;
+            if (chatInput) {
+              chatInput.value = text;
+              chatDraft = text;
+            }
+          };
+          rec.onerror = (event: any) => {
+            console.error('Tutor speech recognition error:', event.error);
+            showMicrophoneError(event.error);
+          };
+          rec.start();
+        } catch (error) {
+          console.error(error);
+          showMicrophoneError('unknown');
+        }
       });
 
       // Replay tutor buttons
