@@ -29,7 +29,89 @@ export interface SpeakingFeedback {
   tutorNote: string;
 }
 
+export interface TutorChatResponse {
+  transcript: string;
+  reply: string;
+  correction?: string;
+}
+
+async function requestTutorChat(payload: {
+  message?: string;
+  audioBase64?: string;
+  mimeType?: string;
+  history: Array<{ role: 'user' | 'assistant'; text: string }>;
+  level: string;
+  correctMode: boolean;
+  transcribeOnly?: boolean;
+}): Promise<TutorChatResponse> {
+  const response = await fetch('/api/tutor-chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+
+  if (!response.ok) {
+    const result = await response.json().catch(() => ({})) as { error?: string };
+    throw new Error(result.error || `Tutor request failed (${response.status})`);
+  }
+
+  return await response.json() as TutorChatResponse;
+}
+
+async function encodeAudio(blob: Blob): Promise<string> {
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result || '');
+      const comma = dataUrl.indexOf(',');
+      if (comma < 0) reject(new Error('Could not encode microphone recording'));
+      else resolve(dataUrl.slice(comma + 1));
+    };
+    reader.onerror = () => reject(new Error('Could not read microphone recording'));
+    reader.readAsDataURL(blob);
+  });
+}
+
 export const AIService = {
+  async chatWithTutor(
+    message: string,
+    history: Array<{ role: 'user' | 'assistant'; text: string }>,
+    level: string,
+    correctMode: boolean
+  ): Promise<TutorChatResponse> {
+    return await requestTutorChat({ message, history, level, correctMode });
+  },
+
+  async speakWithTutor(
+    audio: Blob,
+    history: Array<{ role: 'user' | 'assistant'; text: string }>,
+    level: string,
+    correctMode: boolean
+  ): Promise<TutorChatResponse> {
+    if (audio.size > 2_500_000) throw new Error('Recording is too long. Please keep voice messages under 15 seconds.');
+    return await requestTutorChat({
+      audioBase64: await encodeAudio(audio),
+      mimeType: audio.type || 'audio/webm',
+      history,
+      level,
+      correctMode
+    });
+  },
+
+  async transcribeSpeech(audio: Blob): Promise<string> {
+    if (audio.size > 2_500_000) throw new Error('Recording is too long. Please keep voice messages under 15 seconds.');
+    const response = await requestTutorChat({
+      audioBase64: await encodeAudio(audio),
+      mimeType: audio.type || 'audio/webm',
+      history: [],
+      level: 'A1',
+      correctMode: false,
+      transcribeOnly: true
+    });
+    if (!response.transcript) throw new Error('No speech was detected. Please try again.');
+    return response.transcript;
+  },
+
   /**
    * Generates an adaptive Daily Plan based on user state, mood, free time, and goals.
    */

@@ -4,14 +4,16 @@ import process from 'node:process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dailyPlanHandler } from './src/services/daily-plan-handler';
+import { tutorChatHandler } from './src/services/tutor-chat-handler';
 
 dotenv.config({ path: '.env.local' });
 dotenv.config();
 
 const app = express();
-app.use(express.json({ limit: '8kb' }));
+app.use(express.json({ limit: '4mb' }));
 
 app.post('/api/daily-plan', dailyPlanHandler);
+app.post('/api/tutor-chat', tutorChatHandler);
 
 const isProduction = process.env.NODE_ENV === 'production' || process.argv.includes('--production');
 if (isProduction) {

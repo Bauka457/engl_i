@@ -45,8 +45,14 @@ export function renderSpeakingPage(
 
   let selectedPrompt = prompts.find((p) => p.level === user.currentLevel) || prompts[0];
   let isRecording = false;
-  let recognitionStopRequested = false;
-  let recognition: any = null;
+  let recordingPurpose: 'prompt' | 'tutor' | null = null;
+  let mediaRecorder: MediaRecorder | null = null;
+  let mediaStream: MediaStream | null = null;
+  let recordingChunks: BlobPart[] = [];
+  let recordingTimeout: number | undefined;
+  let recordingComplete: ((blob: Blob) => Promise<void>) | null = null;
+  let isRequestingMicrophone = false;
+  let isTutorThinking = false;
   let transcriptText = '';
   let evaluationResult: any = null;
   let isAnalyzing = false;
@@ -62,62 +68,113 @@ export function renderSpeakingPage(
   ];
   let correctMode = true;
 
-  // Initialize SpeechRecognition if available
-  const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-
-  const microphoneErrorMessage = (error: string) => {
-    if (error === 'not-allowed' || error === 'service-not-allowed' || error === 'NotAllowedError' || error === 'SecurityError') {
+  const microphoneErrorMessage = (error: unknown) => {
+    const errorName = error && typeof error === 'object' && 'name' in error
+      ? String((error as { name?: string }).name || '')
+      : '';
+    const message = error instanceof Error ? error.message : String(error || '');
+    if (errorName === 'NotAllowedError' || errorName === 'SecurityError' || errorName === 'PermissionDeniedError') {
       return isRu
-        ? 'Доступ к микрофону заблокирован. Нажмите на значок настроек сайта рядом с адресом страницы, разрешите микрофон и обновите страницу. Затем нажмите на микрофон ещё раз.'
-        : 'Microphone access is blocked. Open this site’s settings from the icon beside the address bar, allow microphone access, and reload the page. Then try the microphone again.';
+        ? 'Доступ к микрофону запрещён. Разрешите микрофон в настройках сайта рядом с адресной строкой и нажмите на микрофон снова.'
+        : 'Microphone permission is blocked. Allow it in this site’s settings beside the address bar, then click the microphone again.';
     }
-    if (error === 'audio-capture' || error === 'NotFoundError' || error === 'DevicesNotFoundError') {
+    if (errorName === 'NotFoundError' || errorName === 'DevicesNotFoundError') {
       return isRu
         ? 'Микрофон не найден. Подключите его и проверьте, что он выбран в настройках звука устройства.'
         : 'No microphone was found. Connect one and check that it is selected in your device sound settings.';
     }
-    if (error === 'NotReadableError' || error === 'TrackStartError') {
+    if (errorName === 'NotReadableError' || errorName === 'TrackStartError') {
       return isRu
         ? 'Микрофон занят или заблокирован другой программой. Закройте приложения, использующие микрофон, и попробуйте снова.'
         : 'The microphone is busy or blocked by another app. Close other apps using it and try again.';
     }
-    if (error === 'no-speech') {
-      return isRu ? 'Речь не распознана. Попробуйте говорить ближе к микрофону.' : 'No speech was detected. Try speaking closer to the microphone.';
-    }
-    if (error === 'aborted') {
+    if (message.includes('GEMINI_API_KEY') || message.includes('AI tutor is not configured')) {
       return isRu
-        ? 'Распознавание было прервано браузером. Нажмите на микрофон ещё раз и не переключайте вкладку во время записи.'
-        : 'Speech recognition was interrupted by the browser. Click the microphone to retry and keep this tab active while speaking.';
+        ? 'Голосовой тьютор не настроен на сервере: администратору нужно добавить GEMINI_API_KEY в переменные Vercel.'
+        : 'The voice tutor is not configured on the server. The site owner needs to add GEMINI_API_KEY in Vercel settings.';
     }
-    if (error === 'network') {
-      return isRu
-        ? 'Сервис распознавания речи недоступен. Проверьте интернет и попробуйте другой браузер, например Chrome.'
-        : 'The speech recognition service is unavailable. Check your internet connection or try another browser such as Chrome.';
-    }
-    if (error === 'InvalidStateError') {
-      return isRu ? 'Распознавание уже запущено. Остановите его и попробуйте снова.' : 'Speech recognition is already running. Stop it and try again.';
-    }
-    if (error !== 'unknown') {
-      return isRu
-        ? `Браузер сообщил ошибку: ${error}. Попробуйте Chrome или введите ответ вручную.`
-        : `Browser error: ${error}. Try Chrome or type your response instead.`;
-    }
-    return isRu
-      ? 'Не удалось запустить распознавание речи. Проверьте разрешение микрофона в настройках сайта и попробуйте снова.'
-      : 'Speech recognition could not start. Check microphone permission in site settings and try again.';
+    if (message) return message;
+    return isRu ? 'Не удалось запустить микрофон. Проверьте разрешение сайта и подключение микрофона.' : 'Could not start the microphone. Check this site’s permission and microphone connection.';
   };
 
-  const getMicrophoneErrorCode = (error: unknown) => {
-    if (error && typeof error === 'object') {
-      const exception = error as { name?: string; message?: string };
-      return exception.name || exception.message || 'unknown';
-    }
-    return typeof error === 'string' ? error : 'unknown';
-  };
-
-  const showMicrophoneError = (error: string) => {
+  const showMicrophoneError = (error: unknown) => {
     microphoneError = microphoneErrorMessage(error);
     render();
+  };
+
+  const stopRecording = () => {
+    if (recordingTimeout !== undefined) window.clearTimeout(recordingTimeout);
+    recordingTimeout = undefined;
+    if (mediaRecorder?.state === 'recording') mediaRecorder.stop();
+  };
+
+  const startRecording = async (
+    purpose: 'prompt' | 'tutor',
+    onComplete: (blob: Blob) => Promise<void>
+  ) => {
+    if (isRequestingMicrophone || isRecording || isTutorThinking) return;
+    microphoneError = '';
+    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+      showMicrophoneError(new Error(isRu
+        ? 'Для доступа к микрофону откройте сайт через защищённое HTTPS-соединение.'
+        : 'Microphone access requires a secure HTTPS connection.'));
+      return;
+    }
+    if (typeof MediaRecorder === 'undefined') {
+      showMicrophoneError(new Error(isRu
+        ? 'Запись аудио не поддерживается этим браузером. Попробуйте обновлённый Chrome или Edge.'
+        : 'Audio recording is not supported in this browser. Try an up-to-date Chrome or Edge.'));
+      return;
+    }
+
+    isRequestingMicrophone = true;
+    render();
+    try {
+      mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+      });
+      const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus']
+        .find((type) => MediaRecorder.isTypeSupported(type));
+      mediaRecorder = mimeType ? new MediaRecorder(mediaStream, { mimeType }) : new MediaRecorder(mediaStream);
+      recordingChunks = [];
+      recordingPurpose = purpose;
+      recordingComplete = onComplete;
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size) recordingChunks.push(event.data);
+      };
+      mediaRecorder.onerror = (event) => {
+        console.error('Microphone recording error:', event);
+        showMicrophoneError(new Error(isRu ? 'Ошибка записи аудио. Проверьте микрофон и попробуйте снова.' : 'Audio recording failed. Check the microphone and try again.'));
+        stopRecording();
+      };
+      mediaRecorder.onstop = () => {
+        const completedBlob = new Blob(recordingChunks, { type: mediaRecorder?.mimeType || 'audio/webm' });
+        const callback = recordingComplete;
+        mediaStream?.getTracks().forEach((track) => track.stop());
+        mediaStream = null;
+        mediaRecorder = null;
+        recordingChunks = [];
+        recordingComplete = null;
+        recordingPurpose = null;
+        isRecording = false;
+        render();
+        if (completedBlob.size && callback) void callback(completedBlob);
+      };
+      mediaRecorder.start();
+      isRequestingMicrophone = false;
+      isRecording = true;
+      AudioService.playPop();
+      render();
+      recordingTimeout = window.setTimeout(stopRecording, 15_000);
+    } catch (error) {
+      mediaStream?.getTracks().forEach((track) => track.stop());
+      mediaStream = null;
+      mediaRecorder = null;
+      recordingPurpose = null;
+      isRequestingMicrophone = false;
+      isRecording = false;
+      showMicrophoneError(error);
+    }
   };
 
   const render = () => {
@@ -184,11 +241,11 @@ export function renderSpeakingPage(
 
           <!-- Web Speech Recording Section -->
           <div class="speaking-mic-container" style="display: flex; flex-direction: column; align-items: center; text-align: center; margin-bottom: 24px;">
-            <button class="mic-pulse-btn ${isRecording ? 'recording' : ''}" id="record-speech-btn" title="${isRecording ? I18n.t('speaking.stop_recording') : I18n.t('speaking.start_recording')}" style="width: 84px; height: 84px; border-radius: 50%; font-size: 2.4rem; display: flex; align-items: center; justify-content: center; border: none; cursor: pointer; transition: all 0.3s ease; box-shadow: 0 4px 14px rgba(0,0,0,0.1);">
-              <span>${isRecording ? '⏹' : '🎙️'}</span>
+            <button class="mic-pulse-btn ${isRecording && recordingPurpose === 'prompt' ? 'recording' : ''}" id="record-speech-btn" title="${isRecording && recordingPurpose === 'prompt' ? I18n.t('speaking.stop_recording') : I18n.t('speaking.start_recording')}" ${isRequestingMicrophone || isAnalyzing ? 'disabled' : ''} style="width: 84px; height: 84px; border-radius: 50%; font-size: 2.4rem; display: flex; align-items: center; justify-content: center; border: none; cursor: pointer; transition: all 0.3s ease; box-shadow: 0 4px 14px rgba(0,0,0,0.1);">
+              <span>${isRequestingMicrophone ? '⏳' : (isRecording && recordingPurpose === 'prompt' ? '⏹' : '🎙️')}</span>
             </button>
-            <div style="font-size: 0.92rem; font-weight: 700; color: ${isRecording ? 'var(--accent-rose)' : 'var(--text-secondary)'}; margin-top: 14px;" id="record-status-label">
-              ${isRecording ? I18n.t('speaking.recording_active') : I18n.t('speaking.start_recording')}
+            <div style="font-size: 0.92rem; font-weight: 700; color: ${isRecording && recordingPurpose === 'prompt' ? 'var(--accent-rose)' : 'var(--text-secondary)'}; margin-top: 14px;" id="record-status-label">
+              ${isRequestingMicrophone ? (isRu ? 'Ожидаю разрешение на микрофон...' : 'Waiting for microphone permission...') : (isAnalyzing ? (isRu ? 'Распознаю речь...' : 'Transcribing speech...') : (isRecording && recordingPurpose === 'prompt' ? (isRu ? 'Запись... нажмите, чтобы завершить' : 'Recording... tap to finish') : I18n.t('speaking.start_recording')))}
             </div>
           </div>
 
@@ -262,7 +319,7 @@ export function renderSpeakingPage(
               </div>
               <div>
                 <h4 style="font-size: 1rem; font-weight: 800; color: var(--text-primary);">AI English Tutor</h4>
-                <span style="font-size: 0.75rem; color: var(--accent-green-hover); font-weight: 700;">● ${isRu ? 'В сети' : 'Online'}</span>
+                <span style="font-size: 0.75rem; color: ${isTutorThinking ? 'var(--accent-primary)' : 'var(--accent-green-hover)'}; font-weight: 700;">● ${isTutorThinking ? (isRu ? 'Думаю...' : 'Thinking...') : (isRecording && recordingPurpose === 'tutor' ? (isRu ? 'Слушаю...' : 'Listening...') : (isRu ? 'Готов к разговору' : 'Ready to talk'))}</span>
               </div>
             </div>
 
@@ -283,8 +340,9 @@ export function renderSpeakingPage(
                 }; color: ${msg.role === 'user' ? '#fff' : 'var(--text-primary)'}; padding: 12px 16px; border-radius: var(--radius-lg); font-size: 0.95rem; line-height: 1.45; box-shadow: var(--shadow-sm); border: 1px solid ${
                   msg.role === 'user' ? 'var(--accent-primary)' : 'var(--border-subtle)'
                 };">
-                  ${msg.text}
+                  ${escapeHtml(msg.text)}
                 </div>
+                ${msg.correction ? `<div style="margin-top: 5px; font-size: 0.82rem; color: var(--accent-primary);">${escapeHtml(msg.correction)}</div>` : ''}
                 ${
                   msg.role === 'assistant'
                     ? `
@@ -309,12 +367,15 @@ export function renderSpeakingPage(
               placeholder="${isRu ? 'Напишите или продиктуйте ответ по-английски...' : 'Type your answer in English...'}" 
               style="flex: 1; font-size: 15px;"
             />
-            <button class="btn btn-secondary" id="tutor-mic-input-btn" title="Speak via mic" style="padding: 0 16px; font-size: 1.2rem;">
-              🎙️
+            <button class="btn btn-secondary ${isRecording && recordingPurpose === 'tutor' ? 'recording' : ''}" id="tutor-mic-input-btn" title="${isRequestingMicrophone ? (isRu ? 'Запрашиваю доступ к микрофону' : 'Requesting microphone access') : (isRecording && recordingPurpose === 'tutor' ? (isRu ? 'Остановить запись и отправить' : 'Stop and send recording') : (isRu ? 'Сказать голосом' : 'Send a voice message'))}" aria-label="${isRecording && recordingPurpose === 'tutor' ? (isRu ? 'Остановить запись' : 'Stop recording') : (isRu ? 'Записать голосовое сообщение' : 'Record voice message')}" ${isTutorThinking || isRequestingMicrophone ? 'disabled' : ''} style="padding: 0 16px; font-size: 1.2rem; background-color: ${isRecording && recordingPurpose === 'tutor' ? 'var(--accent-rose)' : ''};">
+              ${isRequestingMicrophone || isTutorThinking ? '⏳' : (isRecording && recordingPurpose === 'tutor' ? '⏹' : '🎙️')}
             </button>
-            <button class="btn btn-primary" id="tutor-chat-send-btn" style="font-weight: 700; padding: 0 20px;">
-              ${I18n.t('btn.submit')}
+            <button class="btn btn-primary" id="tutor-chat-send-btn" ${isTutorThinking || (isRecording && recordingPurpose === 'tutor') ? 'disabled' : ''} style="font-weight: 700; padding: 0 20px;">
+              ${isTutorThinking ? (isRu ? 'Отвечаю...' : 'Replying...') : I18n.t('btn.submit')}
             </button>
+          </div>
+          <div style="margin-top: 8px; font-size: 0.8rem; color: var(--text-muted);">
+            ${isRequestingMicrophone ? (isRu ? 'Подтвердите доступ в запросе браузера.' : 'Allow microphone access in your browser prompt.') : (isRecording && recordingPurpose === 'tutor' ? (isRu ? 'Говорите, затем нажмите ■. Максимум 15 секунд.' : 'Speak, then tap ■ to send. Up to 15 seconds.') : (isTutorThinking ? (isRu ? 'Распознаю речь и готовлю ответ...' : 'Transcribing and preparing a reply...') : (isRu ? 'Нажмите 🎙, чтобы записать голосовое сообщение.' : 'Tap 🎙 to record a voice message.')))}
           </div>
         </div>
       `
@@ -374,64 +435,23 @@ export function renderSpeakingPage(
       // Record speech button
       const recordBtn = container.querySelector('#record-speech-btn') as HTMLElement;
       recordBtn?.addEventListener('click', () => {
-        if (!SpeechRecognition) {
-          Toast.show(isRu ? 'Ваш браузер не поддерживает Web Speech API. Введите текст в поле.' : 'Web Speech Recognition not supported in this browser. Please type below.', 'warning');
-          return;
-        }
-
-        if (isRecording) {
-          // Stop recording
-          recognitionStopRequested = true;
-          if (recognition) recognition.stop();
-          isRecording = false;
-          render();
-        } else {
-          // Start recording
-          try {
-            microphoneError = '';
-            recognitionStopRequested = false;
-            container.querySelector('#mic-error-help')?.remove();
-            recognition = new SpeechRecognition();
-            recognition.lang = 'en-US';
-            recognition.interimResults = true;
-            recognition.continuous = false;
-
-            recognition.onstart = () => {
-              isRecording = true;
-              AudioService.playPop();
-              const statusEl = container.querySelector('#record-status-label');
-              if (statusEl) statusEl.textContent = I18n.t('speaking.recording_active');
-              recordBtn.classList.add('recording');
-            };
-
-            recognition.onresult = (event: any) => {
-              const current = event.resultIndex;
-              const text = event.results[current][0].transcript;
-              transcriptText = text;
-              if (textarea) textarea.value = text;
-              const btn = container.querySelector('#analyze-speech-btn') as HTMLButtonElement;
-              if (btn) btn.disabled = false;
-            };
-
-            recognition.onerror = (event: any) => {
-              console.error('Speech recognition error:', event.error);
-              isRecording = false;
-              if (event.error === 'aborted' && recognitionStopRequested) return;
-              showMicrophoneError(event.error);
-            };
-
-            recognition.onend = () => {
-              isRecording = false;
-              recognitionStopRequested = false;
+        if (isRecording && recordingPurpose === 'prompt') {
+          stopRecording();
+        } else if (!isRecording && !isTutorThinking) {
+          void startRecording('prompt', async (audio) => {
+            isAnalyzing = true;
+            render();
+            try {
+              transcriptText = await AIService.transcribeSpeech(audio);
+            } catch (error) {
+              showMicrophoneError(error);
+            } finally {
+              isAnalyzing = false;
               render();
-            };
-
-            recognition.start();
-          } catch (e) {
-            console.error(e);
-            isRecording = false;
-            showMicrophoneError(getMicrophoneErrorCode(e));
-          }
+            }
+          });
+        } else {
+          showMicrophoneError(new Error(isRu ? 'Сначала завершите текущую запись или дождитесь ответа тьютора.' : 'Finish the current recording or wait for the tutor reply first.'));
         }
       });
 
@@ -467,29 +487,39 @@ export function renderSpeakingPage(
       const chatInput = container.querySelector('#tutor-chat-input') as HTMLInputElement;
       const sendBtn = container.querySelector('#tutor-chat-send-btn') as HTMLElement;
       const chatArea = container.querySelector('#tutor-chat-messages') as HTMLElement;
+      const correctModeCheckbox = container.querySelector('#correct-mode-checkbox') as HTMLInputElement;
+      correctModeCheckbox?.addEventListener('change', () => {
+        correctMode = correctModeCheckbox.checked;
+      });
       chatInput?.addEventListener('input', () => {
         chatDraft = chatInput.value;
       });
 
       const sendMessage = async () => {
         const text = chatInput?.value.trim();
-        if (!text) return;
+        if (!text || isTutorThinking || isRecording) return;
+        const history = [...chatHistory];
         chatInput.value = '';
         chatDraft = '';
-
         chatHistory.push({ role: 'user', text });
+        microphoneError = '';
+        isTutorThinking = true;
         render();
 
         try {
-          const resp = await AIService.chatWithTutor(chatHistory, text, correctMode);
-          chatHistory.push({ role: 'assistant', text: resp });
-          AudioService.playPop();
-          AudioService.speak(resp);
+          const answer = await AIService.chatWithTutor(text, history, user.currentLevel, correctMode);
+          chatHistory.push({ role: 'assistant', text: answer.reply, correction: answer.correction });
           ProgressService.addXp(15, isRu ? 'Диалог с AI-тьютором' : 'Tutor chat');
+          AudioService.speak(answer.reply);
+        } catch (error) {
+          console.error('Tutor text conversation failed:', error);
+          chatDraft = text;
+          microphoneError = microphoneErrorMessage(error);
+        } finally {
+          isTutorThinking = false;
           render();
-          if (chatArea) chatArea.scrollTop = chatArea.scrollHeight;
-        } catch (e) {
-          console.error(e);
+          const currentChatArea = container.querySelector('#tutor-chat-messages') as HTMLElement | null;
+          if (currentChatArea) currentChatArea.scrollTop = currentChatArea.scrollHeight;
         }
       };
 
@@ -500,34 +530,33 @@ export function renderSpeakingPage(
 
       // Mic in tutor mode
       container.querySelector('#tutor-mic-input-btn')?.addEventListener('click', () => {
-        if (!SpeechRecognition) {
-          Toast.show(isRu ? 'Web Speech API не поддерживается' : 'Web Speech API not supported', 'warning');
+        if (isRecording && recordingPurpose === 'tutor') {
+          stopRecording();
           return;
         }
-        try {
-          microphoneError = '';
-          container.querySelector('#mic-error-help')?.remove();
-          const rec = new SpeechRecognition();
-          rec.lang = 'en-US';
-          rec.onstart = () => {
-            Toast.show(isRu ? 'Слушаю... Говорите на английском' : 'Listening... Speak in English', 'info');
-          };
-          rec.onresult = (ev: any) => {
-            const text = ev.results[0][0].transcript;
-            if (chatInput) {
-              chatInput.value = text;
-              chatDraft = text;
-            }
-          };
-          rec.onerror = (event: any) => {
-            console.error('Tutor speech recognition error:', event.error);
-            showMicrophoneError(event.error);
-          };
-          rec.start();
-        } catch (error) {
-          console.error(error);
-          showMicrophoneError(getMicrophoneErrorCode(error));
-        }
+        if (isTutorThinking || isRecording) return;
+
+        void startRecording('tutor', async (audio) => {
+          isTutorThinking = true;
+          render();
+          try {
+            const answer = await AIService.speakWithTutor(audio, chatHistory, user.currentLevel, correctMode);
+            if (!answer.transcript) throw new Error(isRu ? 'Не удалось распознать речь. Попробуйте сказать ещё раз.' : 'I could not understand that. Please try speaking again.');
+            chatHistory.push({ role: 'user', text: answer.transcript });
+            chatDraft = '';
+            chatHistory.push({ role: 'assistant', text: answer.reply, correction: answer.correction });
+            ProgressService.addXp(15, isRu ? 'Голосовой диалог с AI-тьютором' : 'Voice tutor conversation');
+            AudioService.speak(answer.reply);
+          } catch (error) {
+            console.error('Tutor voice conversation failed:', error);
+            microphoneError = microphoneErrorMessage(error);
+          } finally {
+            isTutorThinking = false;
+            render();
+            const currentChatArea = container.querySelector('#tutor-chat-messages') as HTMLElement | null;
+            if (currentChatArea) currentChatArea.scrollTop = currentChatArea.scrollHeight;
+          }
+        });
       });
 
       // Replay tutor buttons
@@ -544,6 +573,10 @@ export function renderSpeakingPage(
 
     return container;
   };
+
+  const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (character) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[character] || character);
 
   return render();
 }
