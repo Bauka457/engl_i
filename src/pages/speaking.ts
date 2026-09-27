@@ -45,6 +45,7 @@ export function renderSpeakingPage(
 
   let selectedPrompt = prompts.find((p) => p.level === user.currentLevel) || prompts[0];
   let isRecording = false;
+  let recognitionStopRequested = false;
   let recognition: any = null;
   let transcriptText = '';
   let evaluationResult: any = null;
@@ -82,6 +83,11 @@ export function renderSpeakingPage(
     }
     if (error === 'no-speech') {
       return isRu ? 'Речь не распознана. Попробуйте говорить ближе к микрофону.' : 'No speech was detected. Try speaking closer to the microphone.';
+    }
+    if (error === 'aborted') {
+      return isRu
+        ? 'Распознавание было прервано браузером. Нажмите на микрофон ещё раз и не переключайте вкладку во время записи.'
+        : 'Speech recognition was interrupted by the browser. Click the microphone to retry and keep this tab active while speaking.';
     }
     if (error === 'network') {
       return isRu
@@ -375,6 +381,7 @@ export function renderSpeakingPage(
 
         if (isRecording) {
           // Stop recording
+          recognitionStopRequested = true;
           if (recognition) recognition.stop();
           isRecording = false;
           render();
@@ -382,6 +389,7 @@ export function renderSpeakingPage(
           // Start recording
           try {
             microphoneError = '';
+            recognitionStopRequested = false;
             container.querySelector('#mic-error-help')?.remove();
             recognition = new SpeechRecognition();
             recognition.lang = 'en-US';
@@ -408,11 +416,13 @@ export function renderSpeakingPage(
             recognition.onerror = (event: any) => {
               console.error('Speech recognition error:', event.error);
               isRecording = false;
+              if (event.error === 'aborted' && recognitionStopRequested) return;
               showMicrophoneError(event.error);
             };
 
             recognition.onend = () => {
               isRecording = false;
+              recognitionStopRequested = false;
               render();
             };
 
